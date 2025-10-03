@@ -1,15 +1,12 @@
 'use client';
 
 import { useRef, useState, useEffect } from 'react';
+import dynamic from 'next/dynamic';
 
-// Extend window type for Paystack
-declare global {
-  interface Window {
-    PaystackPop?: {
-      setup: (options: Record<string, unknown>) => { openIframe: () => void };
-    };
-  }
-}
+// Dynamically import Paystack to avoid SSR issues
+const PaystackInline = typeof window !== 'undefined'
+  ? require('@paystack/inline-js').default
+  : null;
 
 const PIXABAY_API_KEY = process.env.NEXT_PUBLIC_PIXABAY_KEY;
 const PAYSTACK_PUBLIC_KEY = process.env.NEXT_PUBLIC_PAYSTACK_PUBLIC_KEY;
@@ -104,11 +101,6 @@ type PixabayVideo = {
   user: string;
 };
 
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return String(error);
-}
-
 export default function Home() {
   const [selectedMainCategory, setSelectedMainCategory] = useState<string | null>(null);
   const [selectedSubcategories, setSelectedSubcategories] = useState<string[]>([]);
@@ -121,18 +113,17 @@ export default function Home() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Load Paystack script (client-only)
+  // Load Paystack ONLY on client
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    const script = document.createElement('script');
-    script.src = 'https://js.paystack.co/v1/inline.js'; // ✅ No trailing spaces
-    script.async = true;
-    document.body.appendChild(script);
-
-    return () => {
-      document.body.removeChild(script);
-    };
+    if (typeof window !== 'undefined') {
+      const script = document.createElement('script');
+      script.src = 'https://js.paystack.co/v1/inline.js';
+      script.async = true;
+      document.body.appendChild(script);
+      return () => {
+        document.body.removeChild(script);
+      };
+    }
   }, []);
 
   const toggleSubcategory = (sub: string) => {
@@ -161,8 +152,8 @@ export default function Home() {
         if (url && !results.includes(url)) {
           results.push(url);
         }
-      } catch (fetchErr) {
-        console.warn(`Failed to fetch videos for: ${query}`, fetchErr);
+      } catch (err) {
+        console.warn(`Failed to fetch videos for: ${query}`, err);
       }
     }
     if (results.length === 0) throw new Error("No videos found.");
@@ -187,14 +178,12 @@ export default function Home() {
     });
 
     if (!response.ok) {
-      let errorMessage = 'Muxing failed';
       try {
         const data = await response.json();
-        errorMessage = data?.error || errorMessage;
+        throw new Error(data?.error || 'Muxing failed');
       } catch {
-        // ignore
+        throw new Error('Muxing failed (unknown server error)');
       }
-      throw new Error(errorMessage);
     }
 
     return await response.blob();
@@ -214,51 +203,35 @@ export default function Home() {
       const muxedBlob = await muxToMusicVideo(videoUrls, audio);
       const muxedUrl = URL.createObjectURL(muxedBlob);
       setMusicVideoUrl(muxedUrl);
-    } catch (err: unknown) {
-      setError(getErrorMessage(err));
+    } catch (err: any) {
+      setError(err.message || 'An unexpected error occurred');
     } finally {
       setLoading(false);
     }
   }
 
   const handleDownloadWithPayment = () => {
-    if (!musicVideoUrl || !PAYSTACK_PUBLIC_KEY) {
-      alert('Payment system not configured.');
-      return;
-    }
+    if (!musicVideoUrl || !PAYSTACK_PUBLIC_KEY) return;
 
     const email = prompt('Enter your email for payment receipt:');
     if (!email) return;
 
     setIsProcessingPayment(true);
 
-    const PaystackPop = window.PaystackPop;
-    if (!PaystackPop) {
-      alert('Payment system failed to load. Please refresh the page.');
-      setIsProcessingPayment(false);
-      return;
-    }
-
-    const handler = PaystackPop.setup({
-      key: PAYSTACK_PUBLIC_KEY,
-      email: email,
-      amount: 1500 * 100,
-      currency: 'NGN',
-      ref: `audio2video_${Date.now()}`,
-      channels: ['card', 'bank', 'ussd', 'qr', 'mobile_money'],
-      callback: async (response: Record<string, unknown>) => {
-        const reference = typeof response.reference === 'string' ? response.reference : null;
-        if (!reference) {
-          alert('Invalid payment response.');
-          setIsProcessingPayment(false);
-          return;
-        }
-
-        try {
+    // Only call Paystack on client
+    if (typeof window !== 'undefined' && PaystackInline) {
+      const handler = PaystackInline.setup({
+        key: PAYSTACK_PUBLIC_KEY,
+        email: email,
+        amount: 1500 * 100,
+        currency: 'NGN',
+        ref: `audio2video_${Date.now()}`,
+        channels: ['card', 'bank', 'ussd', 'qr', 'mobile_money'],
+        callback: async (response: any) => {
           const verifyRes = await fetch('/api/verify-payment', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ reference }),
+            body: JSON.stringify({ reference: response.reference }),
           });
 
           if (verifyRes.ok) {
@@ -270,21 +243,20 @@ export default function Home() {
             document.body.removeChild(link);
           } else {
             const errorText = await verifyRes.text();
-            alert(`Payment verification failed: ${errorText}`);
+            alert(`Payment failed: ${errorText}`);
           }
-        } catch {
-          // ✅ Fixed: no unused variable
-          alert('Network error during verification.');
-        }
-        setIsProcessingPayment(false);
-      },
-      onClose: () => {
-        setIsProcessingPayment(false);
-        alert('Payment cancelled.');
-      },
-    });
-
-    handler.openIframe();
+          setIsProcessingPayment(false);
+        },
+        onClose: () => {
+          setIsProcessingPayment(false);
+          alert('Payment cancelled.');
+        },
+      });
+      handler.openIframe();
+    } else {
+      alert('Payment system not loaded. Please refresh.');
+      setIsProcessingPayment(false);
+    }
   };
 
   const currentCategory = VIDEO_CATEGORIES.find(cat => cat.name === selectedMainCategory);
@@ -299,6 +271,7 @@ export default function Home() {
           <p className="text-slate-600 mt-2">Select a category, choose sub-themes, and create your video!</p>
         </div>
 
+        {/* Step 1: Choose Main Category */}
         {!selectedMainCategory ? (
           <div className="mb-6">
             <h2 className="font-bold text-slate-800 mb-3">1. Choose a Main Category</h2>
@@ -316,6 +289,7 @@ export default function Home() {
           </div>
         ) : (
           <div className="mb-6">
+            {/* Step 2: Choose Subcategories */}
             <div className="flex items-center gap-2 mb-3">
               <button
                 onClick={() => setSelectedMainCategory(null)}
@@ -332,11 +306,10 @@ export default function Home() {
                 <button
                   key={sub}
                   onClick={() => toggleSubcategory(sub)}
-                  className={`px-3 py-1.5 text-sm rounded-lg ${
-                    selectedSubcategories.includes(sub)
+                  className={`px-3 py-1.5 text-sm rounded-lg ${selectedSubcategories.includes(sub)
                       ? 'bg-violet-600 text-white'
                       : 'bg-gray-100 text-slate-700 hover:bg-gray-200'
-                  }`}
+                    }`}
                 >
                   {sub}
                 </button>
