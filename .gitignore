@@ -1,7 +1,17 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies
-node_modules
+
+node_modules/
+.next/
+out/
+build/
+dist/
+*.mp4
+*.mov
+*.zip
+.env.local
+.env
 /.pnp
 .pnp.*
 .yarn/*
