@@ -115,6 +115,7 @@ export default function Home() {
   const [audio, setAudio] = useState<File | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
   const [musicVideoUrl, setMusicVideoUrl] = useState<string | null>(null);
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
@@ -182,7 +183,12 @@ export default function Home() {
     return results;
   }
 
-  async function muxToMusicVideo(videoUrls: string[], audioFile: File): Promise<Blob> {
+  // Progress-aware upload function for muxing
+  async function muxToMusicVideoWithProgress(
+    videoUrls: string[],
+    audioFile: File,
+    onProgress: (percent: number) => void
+  ): Promise<Blob> {
     const videoFiles = await Promise.all(
       videoUrls.map(async (url, i) => {
         const res = await fetch(url);
@@ -190,120 +196,130 @@ export default function Home() {
         return new File([blob], `video${i}.mp4`);
       })
     );
-    const formData = new FormData();
-    videoFiles.forEach((file, i) => formData.append(`video${i}`, file, file.name));
-    formData.append('audio', audioFile, audioFile.name);
+    return new Promise<Blob>((resolve, reject) => {
+      const formData = new FormData();
+      videoFiles.forEach((file, i) => formData.append(`video${i}`, file, file.name));
+      formData.append('audio', audioFile, audioFile.name);
 
-    const response = await fetch('/api/mux', {
-      method: 'POST',
-      body: formData,
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/mux');
+      xhr.responseType = 'blob';
+
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const percent = Math.round((event.loaded / event.total) * 100);
+          onProgress(percent);
+        }
+      };
+      xhr.onload = () => {
+        if (xhr.status === 200) {
+          resolve(xhr.response);
+        } else {
+          let msg = 'Muxing failed';
+          try {
+            msg = JSON.parse(xhr.responseText)?.error || msg;
+          } catch {}
+          reject(new Error(msg));
+        }
+      };
+      xhr.onerror = () => {
+        reject(new Error('Network or server error during muxing.'));
+      };
+      xhr.send(formData);
     });
-
-    if (!response.ok) {
-      let errorMessage = 'Muxing failed';
-      try {
-        const data = await response.json();
-        errorMessage = data?.error || errorMessage;
-      } catch {
-        // ignore
-      }
-      throw new Error(errorMessage);
-    }
-
-    return await response.blob();
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
+    setProgress(0);
     setError(null);
     setMusicVideoUrl(null);
 
     try {
       if (!audio) throw new Error('Please upload audio');
       if (selectedSubcategories.length === 0) throw new Error('Select at least one subcategory');
-
       const videoUrls = await fetchAnimatedVideos(selectedSubcategories);
-      const muxedBlob = await muxToMusicVideo(videoUrls, audio);
+
+      const muxedBlob = await muxToMusicVideoWithProgress(videoUrls, audio, setProgress);
       const muxedUrl = URL.createObjectURL(muxedBlob);
       setMusicVideoUrl(muxedUrl);
     } catch (err: unknown) {
       setError(getErrorMessage(err));
     } finally {
       setLoading(false);
+      setProgress(0);
     }
   }
 
-const handleDownloadWithPayment = () => {
-  if (!musicVideoUrl || !PAYSTACK_PUBLIC_KEY) {
-    alert('Payment system not configured.');
-    return;
-  }
-  if (!window.PaystackPop && !paystackScriptLoaded.current) {
-    alert('Payment system failed to load. Please refresh the page.');
-    setPaystackReady(false);
-    return;
-  }
+  const handleDownloadWithPayment = () => {
+    if (!musicVideoUrl || !PAYSTACK_PUBLIC_KEY) {
+      alert('Payment system not configured.');
+      return;
+    }
+    if (!window.PaystackPop && !paystackScriptLoaded.current) {
+      alert('Payment system failed to load. Please refresh the page.');
+      setPaystackReady(false);
+      return;
+    }
 
-  const email = prompt('Enter your email for payment receipt:');
-  if (!email) return;
+    const email = prompt('Enter your email for payment receipt:');
+    if (!email) return;
 
-  setIsProcessingPayment(true);
+    setIsProcessingPayment(true);
 
-  try {
-    const handler = window.PaystackPop!.setup({
-      key: PAYSTACK_PUBLIC_KEY,
-      email: email,
-      amount: 1500 * 100,
-      currency: 'NGN',
-      ref: `audio2video_${Date.now()}`,
-      channels: ['card', 'bank', 'ussd', 'qr', 'mobile_money'],
-      callback(response: Record<string, unknown>) {
-        // Use a non-async function, but still use async code inside
-        (async () => {
-          const reference = typeof response.reference === 'string' ? response.reference : null;
-          if (!reference) {
-            alert('Invalid payment response.');
-            setIsProcessingPayment(false);
-            return;
-          }
-
-          try {
-            const verifyRes = await fetch('/api/verify-payment', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ reference }),
-            });
-
-            if (verifyRes.ok) {
-              const link = document.createElement('a');
-              link.href = musicVideoUrl;
-              link.download = `musicvideo_${new Date().getTime()}.mp4`;
-              document.body.appendChild(link);
-              link.click();
-              document.body.removeChild(link);
-            } else {
-              const errorText = await verifyRes.text();
-              alert(`Payment verification failed: ${errorText}`);
+    try {
+      const handler = window.PaystackPop!.setup({
+        key: PAYSTACK_PUBLIC_KEY,
+        email: email,
+        amount: 1500 * 100,
+        currency: 'NGN',
+        ref: `audio2video_${Date.now()}`,
+        channels: ['card', 'bank', 'ussd', 'qr', 'mobile_money'],
+        callback(response: Record<string, unknown>) {
+          (async () => {
+            const reference = typeof response.reference === 'string' ? response.reference : null;
+            if (!reference) {
+              alert('Invalid payment response.');
+              setIsProcessingPayment(false);
+              return;
             }
-          } catch {
-            alert('Network error during verification.');
-          }
-          setIsProcessingPayment(false);
-        })();
-      },
-      onClose() {
-        setIsProcessingPayment(false);
-        alert('Payment cancelled.');
-      },
-    });
+            try {
+              const verifyRes = await fetch('/api/verify-payment', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reference }),
+              });
 
-    handler.openIframe();
-  } catch (err) {
-    alert('Paystack Popup failed: ' + getErrorMessage(err));
-    setIsProcessingPayment(false);
-  }
-};
+              if (verifyRes.ok) {
+                const link = document.createElement('a');
+                link.href = musicVideoUrl;
+                link.download = `musicvideo_${new Date().getTime()}.mp4`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+              } else {
+                const errorText = await verifyRes.text();
+                alert(`Payment verification failed: ${errorText}`);
+              }
+            } catch {
+              alert('Network error during verification.');
+            }
+            setIsProcessingPayment(false);
+          })();
+        },
+        onClose() {
+          setIsProcessingPayment(false);
+          alert('Payment cancelled.');
+        },
+      });
+
+      handler.openIframe();
+    } catch (err) {
+      alert('Paystack Popup failed: ' + getErrorMessage(err));
+      setIsProcessingPayment(false);
+    }
+  };
 
   const currentCategory = VIDEO_CATEGORIES.find(cat => cat.name === selectedMainCategory);
 
@@ -402,7 +418,9 @@ const handleDownloadWithPayment = () => {
             disabled={loading || selectedSubcategories.length === 0}
             className="w-full py-3 bg-gradient-to-r from-fuchsia-600 to-violet-600 text-white font-bold rounded-xl disabled:opacity-70"
           >
-            {loading ? 'Creating Video...' : '✨ Create Music Video'}
+            {loading
+              ? `Creating Video...${progress > 0 ? ` ${progress}%` : ''}`
+              : '✨ Create Music Video'}
           </button>
         </form>
 
