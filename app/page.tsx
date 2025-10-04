@@ -1,12 +1,15 @@
 'use client';
 
 import { useRef, useState, useEffect } from 'react';
-import dynamic from 'next/dynamic';
 
-// Dynamically import Paystack to avoid SSR issues
-const PaystackInline = typeof window !== 'undefined'
-  ? require('@paystack/inline-js').default
-  : null;
+// Extend window type for Paystack
+declare global {
+  interface Window {
+    PaystackPop?: {
+      setup: (options: Record<string, unknown>) => { openIframe: () => void };
+    };
+  }
+}
 
 const PIXABAY_API_KEY = process.env.NEXT_PUBLIC_PIXABAY_KEY;
 const PAYSTACK_PUBLIC_KEY = process.env.NEXT_PUBLIC_PAYSTACK_PUBLIC_KEY;
@@ -101,6 +104,11 @@ type PixabayVideo = {
   user: string;
 };
 
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
 export default function Home() {
   const [selectedMainCategory, setSelectedMainCategory] = useState<string | null>(null);
   const [selectedSubcategories, setSelectedSubcategories] = useState<string[]>([]);
@@ -110,20 +118,34 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [musicVideoUrl, setMusicVideoUrl] = useState<string | null>(null);
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
+  const [paystackReady, setPaystackReady] = useState(false);
+  const paystackScriptLoaded = useRef(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Load Paystack ONLY on client
+  // Load Paystack script (client-only)
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const script = document.createElement('script');
-      script.src = 'https://js.paystack.co/v1/inline.js';
-      script.async = true;
-      document.body.appendChild(script);
-      return () => {
-        document.body.removeChild(script);
-      };
+    if (typeof window === 'undefined') return;
+
+    if (window.PaystackPop) {
+      setPaystackReady(true);
+      paystackScriptLoaded.current = true;
+      return;
     }
+
+    const script = document.createElement('script');
+    script.src = 'https://js.paystack.co/v1/inline.js';
+    script.async = true;
+    script.onload = () => {
+      setPaystackReady(true);
+      paystackScriptLoaded.current = true;
+    };
+    script.onerror = () => setPaystackReady(false);
+    document.body.appendChild(script);
+
+    return () => {
+      document.body.removeChild(script);
+    };
   }, []);
 
   const toggleSubcategory = (sub: string) => {
@@ -152,8 +174,8 @@ export default function Home() {
         if (url && !results.includes(url)) {
           results.push(url);
         }
-      } catch (err) {
-        console.warn(`Failed to fetch videos for: ${query}`, err);
+      } catch (fetchErr) {
+        console.warn(`Failed to fetch videos for: ${query}`, fetchErr);
       }
     }
     if (results.length === 0) throw new Error("No videos found.");
@@ -178,12 +200,14 @@ export default function Home() {
     });
 
     if (!response.ok) {
+      let errorMessage = 'Muxing failed';
       try {
         const data = await response.json();
-        throw new Error(data?.error || 'Muxing failed');
+        errorMessage = data?.error || errorMessage;
       } catch {
-        throw new Error('Muxing failed (unknown server error)');
+        // ignore
       }
+      throw new Error(errorMessage);
     }
 
     return await response.blob();
@@ -203,61 +227,83 @@ export default function Home() {
       const muxedBlob = await muxToMusicVideo(videoUrls, audio);
       const muxedUrl = URL.createObjectURL(muxedBlob);
       setMusicVideoUrl(muxedUrl);
-    } catch (err: any) {
-      setError(err.message || 'An unexpected error occurred');
+    } catch (err: unknown) {
+      setError(getErrorMessage(err));
     } finally {
       setLoading(false);
     }
   }
 
-  const handleDownloadWithPayment = () => {
-    if (!musicVideoUrl || !PAYSTACK_PUBLIC_KEY) return;
+const handleDownloadWithPayment = () => {
+  if (!musicVideoUrl || !PAYSTACK_PUBLIC_KEY) {
+    alert('Payment system not configured.');
+    return;
+  }
+  if (!window.PaystackPop && !paystackScriptLoaded.current) {
+    alert('Payment system failed to load. Please refresh the page.');
+    setPaystackReady(false);
+    return;
+  }
 
-    const email = prompt('Enter your email for payment receipt:');
-    if (!email) return;
+  const email = prompt('Enter your email for payment receipt:');
+  if (!email) return;
 
-    setIsProcessingPayment(true);
+  setIsProcessingPayment(true);
 
-    // Only call Paystack on client
-    if (typeof window !== 'undefined' && PaystackInline) {
-      const handler = PaystackInline.setup({
-        key: PAYSTACK_PUBLIC_KEY,
-        email: email,
-        amount: 1500 * 100,
-        currency: 'NGN',
-        ref: `audio2video_${Date.now()}`,
-        channels: ['card', 'bank', 'ussd', 'qr', 'mobile_money'],
-        callback: async (response: any) => {
-          const verifyRes = await fetch('/api/verify-payment', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ reference: response.reference }),
-          });
+  try {
+    const handler = window.PaystackPop!.setup({
+      key: PAYSTACK_PUBLIC_KEY,
+      email: email,
+      amount: 1500 * 100,
+      currency: 'NGN',
+      ref: `audio2video_${Date.now()}`,
+      channels: ['card', 'bank', 'ussd', 'qr', 'mobile_money'],
+      callback(response: Record<string, unknown>) {
+        // Use a non-async function, but still use async code inside
+        (async () => {
+          const reference = typeof response.reference === 'string' ? response.reference : null;
+          if (!reference) {
+            alert('Invalid payment response.');
+            setIsProcessingPayment(false);
+            return;
+          }
 
-          if (verifyRes.ok) {
-            const link = document.createElement('a');
-            link.href = musicVideoUrl;
-            link.download = `musicvideo_${new Date().getTime()}.mp4`;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-          } else {
-            const errorText = await verifyRes.text();
-            alert(`Payment failed: ${errorText}`);
+          try {
+            const verifyRes = await fetch('/api/verify-payment', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ reference }),
+            });
+
+            if (verifyRes.ok) {
+              const link = document.createElement('a');
+              link.href = musicVideoUrl;
+              link.download = `musicvideo_${new Date().getTime()}.mp4`;
+              document.body.appendChild(link);
+              link.click();
+              document.body.removeChild(link);
+            } else {
+              const errorText = await verifyRes.text();
+              alert(`Payment verification failed: ${errorText}`);
+            }
+          } catch {
+            alert('Network error during verification.');
           }
           setIsProcessingPayment(false);
-        },
-        onClose: () => {
-          setIsProcessingPayment(false);
-          alert('Payment cancelled.');
-        },
-      });
-      handler.openIframe();
-    } else {
-      alert('Payment system not loaded. Please refresh.');
-      setIsProcessingPayment(false);
-    }
-  };
+        })();
+      },
+      onClose() {
+        setIsProcessingPayment(false);
+        alert('Payment cancelled.');
+      },
+    });
+
+    handler.openIframe();
+  } catch (err) {
+    alert('Paystack Popup failed: ' + getErrorMessage(err));
+    setIsProcessingPayment(false);
+  }
+};
 
   const currentCategory = VIDEO_CATEGORIES.find(cat => cat.name === selectedMainCategory);
 
@@ -271,7 +317,6 @@ export default function Home() {
           <p className="text-slate-600 mt-2">Select a category, choose sub-themes, and create your video!</p>
         </div>
 
-        {/* Step 1: Choose Main Category */}
         {!selectedMainCategory ? (
           <div className="mb-6">
             <h2 className="font-bold text-slate-800 mb-3">1. Choose a Main Category</h2>
@@ -289,7 +334,6 @@ export default function Home() {
           </div>
         ) : (
           <div className="mb-6">
-            {/* Step 2: Choose Subcategories */}
             <div className="flex items-center gap-2 mb-3">
               <button
                 onClick={() => setSelectedMainCategory(null)}
@@ -306,10 +350,11 @@ export default function Home() {
                 <button
                   key={sub}
                   onClick={() => toggleSubcategory(sub)}
-                  className={`px-3 py-1.5 text-sm rounded-lg ${selectedSubcategories.includes(sub)
+                  className={`px-3 py-1.5 text-sm rounded-lg ${
+                    selectedSubcategories.includes(sub)
                       ? 'bg-violet-600 text-white'
                       : 'bg-gray-100 text-slate-700 hover:bg-gray-200'
-                    }`}
+                  }`}
                 >
                   {sub}
                 </button>
@@ -375,10 +420,14 @@ export default function Home() {
             />
             <button
               onClick={handleDownloadWithPayment}
-              disabled={isProcessingPayment}
+              disabled={isProcessingPayment || !paystackReady}
               className="mt-3 w-full py-2.5 bg-amber-500 text-white font-bold rounded-lg"
             >
-              {isProcessingPayment ? 'Processing...' : '💰 Pay ₦1,500 to Download'}
+              {isProcessingPayment
+                ? 'Processing...'
+                : paystackReady
+                  ? '💰 Pay ₦1,500 to Download'
+                  : 'Initializing payment...'}
             </button>
           </div>
         )}
