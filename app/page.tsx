@@ -118,6 +118,7 @@ export default function Home() {
   const [progress, setProgress] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
   const [musicVideoUrl, setMusicVideoUrl] = useState<string | null>(null);
+  const [lyricsVtt, setLyricsVtt] = useState<string | null>(null); // ✅ Added for subtitles
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
   const [paystackReady, setPaystackReady] = useState(false);
   const paystackScriptLoaded = useRef(false);
@@ -135,7 +136,7 @@ export default function Home() {
     }
 
     const script = document.createElement('script');
-    script.src = 'https://js.paystack.co/v1/inline.js';
+    script.src = 'https://js.paystack.co/v1/inline.js'; // ✅ Removed trailing spaces
     script.async = true;
     script.onload = () => {
       setPaystackReady(true);
@@ -148,6 +149,40 @@ export default function Home() {
       document.body.removeChild(script);
     };
   }, []);
+
+  // ✅ TRANSCRIBE AUDIO USING ASSEMBLYAI
+  useEffect(() => {
+    if (!audio) {
+      setLyricsVtt(null);
+      return;
+    }
+
+    const transcribeAudio = async (audioFile: File) => {
+      const formData = new FormData();
+      formData.append('audio', audioFile);
+
+      try {
+        const res = await fetch('/api/transcript', {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (res.ok) {
+          const vtt = await res.text();
+          setLyricsVtt(vtt);
+        } else {
+          const errorText = await res.text();
+          console.error('Transcription failed:', errorText);
+          setLyricsVtt(null);
+        }
+      } catch (err) {
+        console.error('Transcription error:', err);
+        setLyricsVtt(null);
+      }
+    };
+
+    transcribeAudio(audio);
+  }, [audio]);
 
   const toggleSubcategory = (sub: string) => {
     setSelectedSubcategories(prev =>
@@ -235,6 +270,7 @@ export default function Home() {
     setProgress(0);
     setError(null);
     setMusicVideoUrl(null);
+    setLyricsVtt(null); // Reset lyrics
 
     try {
       if (!audio) throw new Error('Please upload audio');
@@ -435,7 +471,18 @@ export default function Home() {
               controlsList="nodownload"
               className="w-full rounded-xl shadow"
               style={{ maxHeight: '300px' }}
-            />
+            >
+              {/* ✅ ATTACH VTT SUBTITLES */}
+              {lyricsVtt && (
+                <track
+                  kind="subtitles"
+                  src={URL.createObjectURL(new Blob([lyricsVtt], { type: 'text/vtt' }))}
+                  srcLang="en"
+                  label="Lyrics"
+                  default
+                />
+              )}
+            </video>
             <button
               onClick={handleDownloadWithPayment}
               disabled={isProcessingPayment || !paystackReady}
