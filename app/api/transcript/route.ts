@@ -1,3 +1,4 @@
+// app/api/transcript/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 
 const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY;
@@ -7,7 +8,7 @@ if (!ASSEMBLYAI_API_KEY) {
 }
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 300; // 5 minutes
+export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
   if (!ASSEMBLYAI_API_KEY) {
@@ -27,7 +28,7 @@ export async function POST(req: NextRequest) {
 
     const audioBuffer = Buffer.from(await audioFile.arrayBuffer());
 
-    // Step 1: Upload audio to AssemblyAI
+    // Step 1: Upload audio to AssemblyAI (NO TRAILING SPACES!)
     const uploadRes = await fetch('https://api.assemblyai.com/v2/upload', {
       method: 'POST',
       headers: {
@@ -45,7 +46,7 @@ export async function POST(req: NextRequest) {
 
     const { upload_url } = await uploadRes.json();
 
-    // Step 2: Request transcription
+    // Step 2: Request transcription (NO TRAILING SPACES!)
     const transcriptRes = await fetch('https://api.assemblyai.com/v2/transcript', {
       method: 'POST',
       headers: {
@@ -68,7 +69,7 @@ export async function POST(req: NextRequest) {
 
     const { id: transcriptId } = await transcriptRes.json();
 
-    // Step 3: Poll until complete
+    // Step 3: Poll until complete (NO SPACES IN URL!)
     let transcriptData;
     let attempts = 0;
     while (attempts < 60) {
@@ -85,14 +86,14 @@ export async function POST(req: NextRequest) {
       }
 
       attempts++;
-      await new Promise(resolve => setTimeout(resolve, 2000)); // wait 2s
+      await new Promise(resolve => setTimeout(resolve, 2000));
     }
 
     if (transcriptData.status !== 'completed') {
       return NextResponse.json({ error: 'Transcription timed out' }, { status: 500 });
     }
 
-    // Step 4: Fetch VTT subtitles directly from AssemblyAI (correct way!)
+    // Step 4: Fetch VTT (NO SPACES!)
     const vttRes = await fetch(`https://api.assemblyai.com/v2/transcript/${transcriptId}/vtt`, {
       headers: { Authorization: ASSEMBLYAI_API_KEY },
     });
